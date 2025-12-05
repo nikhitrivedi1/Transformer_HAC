@@ -1,0 +1,37 @@
+# Data Parameters
+patch_length: 16
+stride: 8
+num_channels: 3
+lookback_window: 1024
+num_batches: 128
+loss: cross_entropy
+
+# Training Parameters
+epochs: 75
+# Optimizer Parameters
+optimizer: 'sgdwr'
+lr: 0.001
+weight_decay: 0.0001
+min_lr: 0.0001
+momentum: 0.9
+scheduler: 'cosine_restart'
+
+
+# Transformer Encoder Parameters
+d_model : 128
+t_heads: 16
+t_dim_feedforward: 256
+t_dropout: 0.2
+t_activation: 'gelu'
+t_num_layers: 3
+
+# MLP Parameters
+mlp_hidden_size: 128
+num_classes: 10
+
+# Channel Independence Parameters
+channel_independence: true
+# Evaluation Parameters
+hook_attention_maps: false
+
+output_dir: config_3_sgdwr_cosine_restarts/
