@@ -83,13 +83,14 @@ class PatchTST(nn.Module):
         # Flatten the number of patches and the dimension of the model
         self.flatten2 = nn.Flatten(1, 2)
 
-        # self.classifier = nn.Linear(self.num_patches*config['t_dim_feedforward'], config['num_classes'])
 
-        self.classifier = nn.Sequential(
-            nn.Linear(self.num_patches*config['d_model'], config['mlp_hidden_size']),
-            nn.ReLU(),
-            nn.Linear(config['mlp_hidden_size'], config['num_classes']),
-        )
+        self.classifier = nn.Linear(self.num_patches*config['d_model'], config['num_classes'])
+
+        # self.classifier = nn.Sequential(
+        #     nn.Linear(self.num_patches*config['d_model'], config['mlp_hidden_size']),
+        #     nn.ReLU(),
+        #     nn.Linear(config['mlp_hidden_size'], config['num_classes']),
+        # )
 
         self.config = config
 
@@ -122,7 +123,7 @@ class PatchTST(nn.Module):
             x = x.mean(dim=1)
 
         # Flatten all the patches together with embedding 
-        x = self.flatten2(x) # output is (B, N*d_model)
+        x = self.flatten2(x) # output is (B, N*d_model) -> if channel independence is True, then (B, N * 
         x = self.classifier(x) # output is (B, num_classes) # final output shape
         return x
 
