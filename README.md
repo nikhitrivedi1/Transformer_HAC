@@ -36,6 +36,7 @@ In this work, I adapt these ideas to **sequence classification on CAPTURE-24**, 
 | `1024 Lookback`  |    .382    |   .554    |      .559        | Mixed Channels: L=1024, P=32, S=8    |
 | `Channel Independence`  |    .384    |   .523    |      .523       | Channel Independence: L=1024, P=16, S=8    |
 | `MLP -> LinearProj`  |    .414    |   .598   |      .601       | LinearProj (d -> num classes)  + Channel Independence: L=1024, P=16, S=8    |
+| `Filtered NA + Warmup Schedule`  |    .442   |   .604   |      .606       | LinearProj (d -> num classes)  + Channel Independence: L=1024, P=16, S=8    |
 ---
 
 ## References
