@@ -3,7 +3,7 @@ import numpy as np
 import json
 import torch
 from torch import nn
-from torchmetrics import Accuracy, F1Score, Precision, Recall
+from torchmetrics.classification import MulticlassF1Score
 from torch.utils.data import DataLoader, Dataset
 import torch.nn.functional as F
 import yaml
@@ -13,6 +13,8 @@ import gzip
 import argparse
 # from custom_encoder import CustomEncoder
 import os
+# import weights and biases for logging
+import wandb
 
 
 class PatchingLayer(nn.Module):
@@ -94,6 +96,14 @@ class PatchTST(nn.Module):
 
         self.config = config
 
+        # WB Run - for logging
+        self.run = wandb.init(
+            entity="nikhitrivedi1-northeastern-university",
+            project="PatchTST Classifier",
+            config=config,
+            name=config['run_name'],
+        )
+
     def forward(self, x):
         # Nomenclature to match PatchTST paper
         # B = batch size, M = channels, N = number of patches, P = patch length, T = time steps
@@ -143,15 +153,11 @@ class C24_Dataset(Dataset):
         return self.X[index], self.Y[index]
 
 
-def train_model(model, train_loader, test_loader, config):
+def train_model(model, train_loader, valid_loader, config):
     device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
     print(f"Device: {device}")
 
-    # Evaluation Metrics
-    # accuracy = Accuracy(task='multiclass', num_classes=config['num_classes'])
-    # f1_score = F1Score(task='multiclass', num_classes=config['num_classes'])
-    # precision = Precision(task='multiclass', num_classes=config['num_classes'])
-    # recall = Recall(task='multiclass', num_classes=config['num_classes'])
+
     # Initialize the optimizer
     if config['optimizer'] == 'adam':
         optimizer = torch.optim.Adam(
@@ -184,6 +190,27 @@ def train_model(model, train_loader, test_loader, config):
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=config['step_size'], gamma=config['gamma'])
     elif config['scheduler'] == 'cosine_restart':
         scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=config['min_lr'])
+    elif config['scheduler'] == 'cosine_warmup':
+        # LinearLR for the first portion of the training
+        warmup = torch.optim.lr_scheduler.LinearLR(
+            optimizer, 
+            start_factor=.00001, # 1e-5
+            end_factor=1.0, 
+            total_iters=config['warmup_epochs']
+        )
+        # CosineAnnealingLR for the remaining time
+        cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, 
+            T_max=config['epochs'] - config['warmup_epochs'], 
+            eta_min=config['min_lr']
+        )
+        
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer, 
+            [warmup, cosine],
+            milestones=[config['warmup_epochs']]
+        )
+
     elif config['scheduler'] == 'none':
         scheduler = None
     else:
@@ -201,16 +228,7 @@ def train_model(model, train_loader, test_loader, config):
     # Initialize the device
     model.to(device)
 
-    # Train the model
-    e_train_losses = []
-    e_test_losses = []
-    b_train_losses = []
-    b_test_losses = []
-    lr_scores = []
-    precision_scores = []
-    recall_scores = []
-    f1_scores = []
-    accuracy_scores = []
+
     for epoch in tqdm.tqdm(range(config['epochs']), desc="Training"):
         model.train() # train mode
         b_train_loss = 0
@@ -224,69 +242,51 @@ def train_model(model, train_loader, test_loader, config):
             optimizer.step()
 
             b_train_loss += loss.item()
-            b_train_losses.append(loss.item())
 
         if scheduler is not None:
-            lr_scores.append(scheduler.get_last_lr()[0])
+            # lr_scores.append(scheduler.get_last_lr()[0])
             scheduler.step()
 
         model.eval() # eval mode
         with torch.no_grad():
-            b_test_loss = 0
-            for x_batch, y_batch in tqdm.tqdm(test_loader, desc=f"Epoch {epoch+1}/{config['epochs']}"):
+            f1_score = MulticlassF1Score(num_classes=10, average='macro').to(device)
+
+            b_valid_loss = 0
+            for x_batch, y_batch in tqdm.tqdm(valid_loader, desc=f"Epoch {epoch+1}/{config['epochs']}"):
                 x_batch = x_batch.to(device)
                 y_batch = y_batch.to(device)
                 output = model(x_batch)
 
                 loss = loss_function(output, y_batch)
-                b_test_loss += loss.item()
-                b_test_losses.append(loss.item())
+                b_valid_loss += loss.item()
 
-                # come up with class prediction
-                # class_prediction = torch.softmax(output, dim=1)
-                # class_prediction = torch.argmax(class_prediction, dim=1)
+                # calcualte f1_score 
+                preds = output.argmax(dim=1)
+                f1_score.update(preds, y_batch)
 
-                # # Evaluation Metrics per batch
-                # accuracy_scores.append(accuracy(class_prediction.cpu(), y_batch.cpu()))
-                # precision_scores.append(precision(class_prediction.cpu(), y_batch.cpu()))
-                # recall_scores.append(recall(class_prediction.cpu(), y_batch.cpu()))
-                # f1_scores.append(f1_score(class_prediction.cpu(), y_batch.cpu()))
-
-
-        e_train_losses.append(b_train_loss / len(train_loader))
-        e_test_losses.append(b_test_loss / len(test_loader))
-
-    
-    losses = {
-        'b_train_losses': b_train_losses,
-        'b_test_losses': b_test_losses,
-        'e_train_losses': e_train_losses,
-        'e_test_losses': e_test_losses,
-        'lr_scores': lr_scores,
-    }
-
-    metrics = {
-        'precision_scores': precision_scores,
-        'recall_scores': recall_scores,
-        'f1_scores': f1_scores,
-        'accuracy_scores': accuracy_scores,
-    }
-    return model, losses, metrics
+        model.run.log({
+            'train/epoch_loss': b_train_loss / len(train_loader),
+            'valid/epoch_loss': b_valid_loss / len(valid_loader),
+            'lr': scheduler.get_last_lr()[0],
+            'f1_score': f1_score.compute(),
+        }, 
+        step = epoch)
+    return model
 
 
 def main():
     # Load the data
-    with gzip.open('final_data_1024/X_train.npy.gz', 'rb') as f:
+    with gzip.open('final_data_1024_mode_v/X_train.npy.gz', 'rb') as f:
         X_train = np.load(f)
-    with gzip.open('final_data_1024/Y_train.npy.gz', 'rb') as f:
+    with gzip.open('final_data_1024_mode_v/Y_train.npy.gz', 'rb') as f:
         Y_train = np.load(f)
-    with gzip.open('final_data_1024/X_test.npy.gz', 'rb') as f:
-        X_test = np.load(f)
-    with gzip.open('final_data_1024/Y_test.npy.gz', 'rb') as f:
-        Y_test = np.load(f)
+    with gzip.open('final_data_1024_mode_v/X_valid.npy.gz', 'rb') as f:
+        X_valid = np.load(f)
+    with gzip.open('final_data_1024_mode_v/Y_valid.npy.gz', 'rb') as f:
+        Y_valid = np.load(f)
 
     # Load the index to label and label to index
-    with open('final_data_1024/label_to_index.json', 'r') as f:
+    with open('final_data_1024_mode_v/label_to_index.json', 'r') as f:
         data = json.load(f)
 
     idx_to_label = data['index_to_label']
@@ -294,13 +294,28 @@ def main():
 
     # Create the test and train datasests
     train_dataset = C24_Dataset(X_train, Y_train, idx_to_label, label_to_idx)
-    test_dataset = C24_Dataset(X_test, Y_test, idx_to_label, label_to_idx)
+    valid_dataset = C24_Dataset(X_valid, Y_valid, idx_to_label, label_to_idx)
     
-    
+    # Import Config from SLURM Job Array
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/config_1.yaml')
+    # Search Space Parameters
+    parser.add_argument('--patch_length', type=int, default=16)
+    parser.add_argument('--stride', type=int, default=8)
+    parser.add_argument('--lr', type=float, default=0.0001)
+    parser.add_argument('--t_dropout', type=float, default=0.25)
+    parser.add_argument('--t_num_layers', type=int, default=1)
+    parser.add_argument('--run_name', type=str, default='config_1')
+
     args = parser.parse_args()
     config = yaml.safe_load(open(args.config, 'r'))
+    config['patch_length'] = args.patch_length
+    config['stride'] = args.stride
+    config['lr'] = args.lr
+    config['t_dropout'] = args.t_dropout
+    config['t_num_layers'] = args.t_num_layers
+    config['run_name'] = args.run_name
+
 
     if config['output_dir'] is not None:
         path_folder = config['output_dir']
@@ -323,8 +338,8 @@ def main():
         persistent_workers=False, 
         prefetch_factor=None,
     )
-    test_loader = DataLoader(
-        test_dataset, 
+    valid_loader = DataLoader(
+        valid_dataset, 
         batch_size=config['num_batches'], 
         shuffle=False, 
         num_workers=0, 
@@ -338,32 +353,14 @@ def main():
     model = PatchTST(config)
 
 
-    # Calculate the weight for the weighted cross entropy loss
-    # counts = torch.bincount(torch.from_numpy(Y_train), minlength=config['num_classes'])
-    # weights = 1 / counts
-    # weights = weights * ( config['num_classes'] / counts.sum())
-    # config['weight'] = weights
-    # print(f"Weight: {weights}")
-    # exit()
-
-
     # Train the model
-    model, losses, metrics = train_model(model, train_loader, test_loader, config)
+    try:
+        model = train_model(model, train_loader, valid_loader, config)
+    finally:
+        model.run.finish()
 
-    # Save the model
-    torch.save(model.state_dict(), f'{path_folder}/patchtst_model.pth')
-
-    # Save the losses
-    np.save(f'{path_folder}/b_train_losses.npy', losses['b_train_losses'])
-    np.save(f'{path_folder}/b_test_losses.npy', losses['b_test_losses'])
-    np.save(f'{path_folder}/e_train_losses.npy', losses['e_train_losses'])
-    np.save(f'{path_folder}/e_test_losses.npy', losses['e_test_losses'])
-
-    # Save the metrics
-    np.save(f'{path_folder}/precision_scores.npy', metrics['precision_scores'])
-    np.save(f'{path_folder}/recall_scores.npy', metrics['recall_scores'])
-    np.save(f'{path_folder}/f1_scores.npy', metrics['f1_scores'])
-    np.save(f'{path_folder}/accuracy_scores.npy', metrics['accuracy_scores'])
+    # Save the model - don't need to save the model as we are using WB for logging
+    # torch.save(model.state_dict(), f'{path_folder}/patchtst_model.pth')
 
 if __name__ == "__main__":
     main()
