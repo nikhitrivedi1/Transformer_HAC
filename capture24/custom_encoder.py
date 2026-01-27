@@ -21,7 +21,7 @@ class CustomEncoder(nn.TransformerEncoderLayer):
                 attn_mask=attn_mask,
                 key_padding_mask=key_padding_mask,
                 need_weights=True,
-                average_attn_weights=False,
+                average_attn_weights=True,
                 is_causal=is_causal,
             )[0]
             return self.dropout1(x)
