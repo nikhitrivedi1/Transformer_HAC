@@ -11,7 +11,7 @@ import tqdm
 import matplotlib.pyplot as plt
 import gzip
 import argparse
-# from custom_encoder import CustomEncoder
+from capture24.custom_encoder import CustomEncoder
 import os
 # import weights and biases for logging
 import wandb
@@ -60,7 +60,8 @@ class PatchTST(nn.Module):
         self.pos_encoding = nn.Parameter(torch.zeros(1, self.num_patches, config['d_model']))
 
         # Transformer Encoder
-        encoder_layer = nn.TransformerEncoderLayer(
+        # Custom Encoder used for attention studies
+        encoder_layer = CustomEncoder(
             d_model=config['d_model'],
             nhead=config['t_heads'], 
             dim_feedforward=config['t_dim_feedforward'], 
@@ -97,12 +98,12 @@ class PatchTST(nn.Module):
         self.config = config
 
         # WB Run - for logging
-        self.run = wandb.init(
-            entity="nikhitrivedi1-northeastern-university",
-            project="PatchTST Classifier",
-            config=config,
-            name=config['run_name'],
-        )
+        # self.run = wandb.init(
+        #     entity="nikhitrivedi1-northeastern-university",
+        #     project="PatchTST_baseline_patch_study_test",
+        #     config=config,
+        #     name=config['run_name'],
+        # )
 
     def forward(self, x):
         # Nomenclature to match PatchTST paper
@@ -123,7 +124,6 @@ class PatchTST(nn.Module):
 
         x = x + self.pos_encoding # output is (B, N, d_model)
         x = self.encoder(x) # output is (B, N, d_model)
-
 
         if self.config['channel_independence']:
             BC, N, d_model = x.shape
@@ -153,7 +153,32 @@ class C24_Dataset(Dataset):
         return self.X[index], self.Y[index]
 
 
-def train_model(model, train_loader, valid_loader, config):
+
+def build_param_groups_adamw(model, weight_decay):
+    decay = []
+    no_decay = []
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        # Rules commonly used for Transformers
+        if name.endswith("bias"):
+            no_decay.append(param)
+        elif "norm" in name.lower() or "layernorm" in name.lower():
+            no_decay.append(param)
+        elif "embedding" in name.lower() or "embed" in name.lower():
+            no_decay.append(param)  # optional but common
+        else:
+            decay.append(param)
+
+    return [
+        {"params": decay, "weight_decay": weight_decay},
+        {"params": no_decay, "weight_decay": 0.0},
+    ]
+
+
+
+def train_model(model, train_loader, eval_loader, config):
     device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
     print(f"Device: {device}")
 
@@ -165,10 +190,12 @@ def train_model(model, train_loader, valid_loader, config):
             lr=config['lr'],
             )
     elif config['optimizer'] == 'adamw':
+        # Need to configure seperate groups -> do not want weight_decay value to apply to bias or layeer norm
+        param_group = build_param_groups_adamw(model, config['weight_decay'])
         optimizer = torch.optim.AdamW(
-            model.parameters(), 
-            lr=config['lr'],
-            weight_decay=config['weight_decay'],
+            param_group,
+            lr = config['lr'],
+            eps = 1e-10
         )
     elif config['optimizer'] == 'sgdwr':
         optimizer = torch.optim.SGD(
@@ -219,15 +246,15 @@ def train_model(model, train_loader, valid_loader, config):
     # Initialize the loss function
     if config['loss'] == 'cross_entropy':
         loss_function = nn.CrossEntropyLoss()
-    elif config['loss'] == 'weighted_cross_entropy':
-        loss_function = nn.CrossEntropyLoss(weight=config['weight'])
+    elif config['loss'] == 'w_cross_entropy':
+        # calculate the weights
+        loss_function = nn.CrossEntropyLoss(weight=config['weight'].to(device))
     else:
         raise ValueError(f"Loss function {config['loss_function']} not supported")
     # Initialize the scheduler
     # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=config['step_size'], gamma=config['gamma'])
     # Initialize the device
     model.to(device)
-
 
     for epoch in tqdm.tqdm(range(config['epochs']), desc="Training"):
         model.train() # train mode
@@ -251,51 +278,41 @@ def train_model(model, train_loader, valid_loader, config):
         with torch.no_grad():
             f1_score = MulticlassF1Score(num_classes=10, average='macro').to(device)
 
-            b_valid_loss = 0
-            for x_batch, y_batch in tqdm.tqdm(valid_loader, desc=f"Epoch {epoch+1}/{config['epochs']}"):
+            b_eval_loss = 0
+            for x_batch, y_batch in tqdm.tqdm(eval_loader, desc=f"Epoch {epoch+1}/{config['epochs']}"):
                 x_batch = x_batch.to(device)
                 y_batch = y_batch.to(device)
                 output = model(x_batch)
 
                 loss = loss_function(output, y_batch)
-                b_valid_loss += loss.item()
+                b_eval_loss += loss.item()
 
                 # calcualte f1_score 
                 preds = output.argmax(dim=1)
                 f1_score.update(preds, y_batch)
 
-        model.run.log({
-            'train/epoch_loss': b_train_loss / len(train_loader),
-            'valid/epoch_loss': b_valid_loss / len(valid_loader),
-            'lr': scheduler.get_last_lr()[0],
-            'f1_score': f1_score.compute(),
-        }, 
-        step = epoch)
+        # Handle both Validation and Test Sets here
+        if config['run_type'] == 'validation':
+            model.run.log({
+                'train/epoch_loss': b_train_loss / len(train_loader),
+                'valid/epoch_loss': b_eval_loss / len(eval_loader),
+                'lr': scheduler.get_last_lr()[0],
+                'f1_score': f1_score.compute(),
+            }, 
+            step = epoch)
+        elif config['run_type'] == 'test': 
+            model.run.log({
+                'train/epoch_loss': b_train_loss / len(train_loader),
+                'test/epoch_loss': b_eval_loss / len(eval_loader),
+                'lr': scheduler.get_last_lr()[0],
+                'f1_score': f1_score.compute(),
+            }, 
+            step = epoch)
     return model
 
 
 def main():
-    # Load the data
-    with gzip.open('final_data_1024_mode_v/X_train.npy.gz', 'rb') as f:
-        X_train = np.load(f)
-    with gzip.open('final_data_1024_mode_v/Y_train.npy.gz', 'rb') as f:
-        Y_train = np.load(f)
-    with gzip.open('final_data_1024_mode_v/X_valid.npy.gz', 'rb') as f:
-        X_valid = np.load(f)
-    with gzip.open('final_data_1024_mode_v/Y_valid.npy.gz', 'rb') as f:
-        Y_valid = np.load(f)
 
-    # Load the index to label and label to index
-    with open('final_data_1024_mode_v/label_to_index.json', 'r') as f:
-        data = json.load(f)
-
-    idx_to_label = data['index_to_label']
-    label_to_idx = data['label_to_index']
-
-    # Create the test and train datasests
-    train_dataset = C24_Dataset(X_train, Y_train, idx_to_label, label_to_idx)
-    valid_dataset = C24_Dataset(X_valid, Y_valid, idx_to_label, label_to_idx)
-    
     # Import Config from SLURM Job Array
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/config_1.yaml')
@@ -306,6 +323,12 @@ def main():
     parser.add_argument('--t_dropout', type=float, default=0.25)
     parser.add_argument('--t_num_layers', type=int, default=1)
     parser.add_argument('--run_name', type=str, default='config_1')
+    parser.add_argument('--n_heads', type=int, default=16)
+    parser.add_argument('--optimizer_type', type=str, default='adam')
+    parser.add_argument('--weight_decay', type=float, default=0.01)
+    parser.add_argument('--loss', type=str, default='cross_entropy')
+    parser.add_argument('--run_type', type=str, default='test')
+    parser.add_argument('--output_dir', type=str, default=None)
 
     args = parser.parse_args()
     config = yaml.safe_load(open(args.config, 'r'))
@@ -315,7 +338,44 @@ def main():
     config['t_dropout'] = args.t_dropout
     config['t_num_layers'] = args.t_num_layers
     config['run_name'] = args.run_name
+    config['t_heads'] = args.n_heads
+    config['optimizer'] = args.optimizer_type
+    config['weight_decay'] = args.weight_decay
+    config['loss'] = args.loss
+    config['weight'] = torch.from_numpy(np.load('final_data_1024_mode_v/weights.npy')).float()
+    config['run_type'] = args.run_type
+    config['output_dir'] = args.output_dir
 
+    # Based on args - load the correct data files
+    # Load the data
+    with gzip.open('final_data_1024_mode_v/X_train.npy.gz', 'rb') as f:
+        X_train = np.load(f)
+    with gzip.open('final_data_1024_mode_v/Y_train.npy.gz', 'rb') as f:
+        Y_train = np.load(f)
+
+    # Load the index to label and label to index
+    with open('final_data_1024_mode_v/label_to_index.json', 'r') as f:
+        data = json.load(f)
+
+    idx_to_label = data['index_to_label']
+    label_to_idx = data['label_to_index']
+
+    if config['run_type'] == 'validation':
+        with gzip.open('final_data_1024_mode_v/X_valid.npy.gz', 'rb') as f:
+            X_valid = np.load(f)
+        with gzip.open('final_data_1024_mode_v/Y_valid.npy.gz', 'rb') as f:
+            Y_valid = np.load(f)
+        eval_dataset = C24_Dataset(X_valid, Y_valid, idx_to_label, label_to_idx)
+    elif config['run_type'] == 'test':
+        with gzip.open('final_data_1024_mode_v/X_test.npy.gz', 'rb') as f:
+            X_test = np.load(f)
+        with gzip.open('final_data_1024_mode_v/Y_test.npy.gz', 'rb') as f:
+            Y_test = np.load(f)
+        eval_dataset = C24_Dataset(X_test, Y_test, idx_to_label, label_to_idx)
+
+
+    # Create the test and train datasests
+    train_dataset = C24_Dataset(X_train, Y_train, idx_to_label, label_to_idx)
 
     if config['output_dir'] is not None:
         path_folder = config['output_dir']
@@ -339,7 +399,7 @@ def main():
         prefetch_factor=None,
     )
     valid_loader = DataLoader(
-        valid_dataset, 
+        eval_dataset, 
         batch_size=config['num_batches'], 
         shuffle=False, 
         num_workers=0, 
@@ -352,15 +412,18 @@ def main():
     # Initialize the model
     model = PatchTST(config)
 
-
     # Train the model
     try:
         model = train_model(model, train_loader, valid_loader, config)
     finally:
         model.run.finish()
 
-    # Save the model - don't need to save the model as we are using WB for logging
-    # torch.save(model.state_dict(), f'{path_folder}/patchtst_model.pth')
+    # Save the model - don't need to save the model as we are using WB for validation - however, for test we do need to save the model
+    torch.save(model.state_dict(), f'{path_folder}/patchtst_model.pth')
+
+    # Save the config
+    with open(f'{path_folder}/config.yaml', 'w') as f:
+        yaml.dump(config, f)
 
 if __name__ == "__main__":
     main()
