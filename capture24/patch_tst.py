@@ -11,11 +11,11 @@ import tqdm
 import matplotlib.pyplot as plt
 import gzip
 import argparse
-from capture24.custom_encoder import CustomEncoder
+# from custom_encoder import CustomEncoder
 import os
+import math
 # import weights and biases for logging
 import wandb
-
 
 class PatchingLayer(nn.Module):
     def __init__(self, config: dict):
@@ -39,6 +39,18 @@ class PatchingLayer(nn.Module):
         patches = x.unfold(1, self.patch_length, self.stride)
         return patches
 
+class FixedPositionalEncoding(nn.Module):
+    def __init__(self, d_model: int, max_len: int = 1024):
+        super().__init__()
+        self.pos_encodings = torch.zeros(1, max_len, d_model)
+        position = torch.arange(0, max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * -(math.log(10000.0) / d_model))
+        # sin and cos for even and odd indices respectively
+        self.pos_encodings[:, :, 0::2] = torch.sin(position * div_term) # even indices
+        self.pos_encodings[:, :, 1::2] = torch.cos(position * div_term) # odd indices
+    
+    def forward(self, x):
+        return self.pos_encodings[:, :x.shape[1], :].to(x.device)
 
 class PatchTST(nn.Module):
     def __init__(self, config: dict):
@@ -57,11 +69,14 @@ class PatchTST(nn.Module):
             self.linear1 = nn.Linear(config['patch_length']*config['num_channels'], config['d_model'])
 
         # trainable conditional encoding
-        self.pos_encoding = nn.Parameter(torch.zeros(1, self.num_patches, config['d_model']))
+        if config['trainable_pos_encoding']:
+            self.pos_encoding = nn.Parameter(torch.zeros(1, self.num_patches, config['d_model']))
+        else:
+            self.pos_encoding = FixedPositionalEncoding(config['d_model'], self.num_patches)
 
         # Transformer Encoder
         # Custom Encoder used for attention studies
-        encoder_layer = CustomEncoder(
+        encoder_layer = nn.TransformerEncoderLayer(
             d_model=config['d_model'],
             nhead=config['t_heads'], 
             dim_feedforward=config['t_dim_feedforward'], 
@@ -87,23 +102,27 @@ class PatchTST(nn.Module):
         self.flatten2 = nn.Flatten(1, 2)
 
 
-        self.classifier = nn.Linear(self.num_patches*config['d_model'], config['num_classes'])
-
-        # self.classifier = nn.Sequential(
-        #     nn.Linear(self.num_patches*config['d_model'], config['mlp_hidden_size']),
-        #     nn.ReLU(),
-        #     nn.Linear(config['mlp_hidden_size'], config['num_classes']),
-        # )
+        # Classifier Layer - two options - linear or MLP
+        if config['classifier'] == 'linear':
+            self.classifier = nn.Linear(self.num_patches*config['d_model'], config['num_classes'])
+        elif config['classifier'] == 'mlp':
+            self.classifier = nn.Sequential(
+                nn.Linear(self.num_patches*config['d_model'], config['mlp_hidden_size']),
+                nn.ReLU(),
+                nn.Linear(config['mlp_hidden_size'], config['num_classes']),
+            )
+        else:
+            raise ValueError(f"Classifier {config['classifier']} not supported")
 
         self.config = config
 
         # WB Run - for logging
-        # self.run = wandb.init(
-        #     entity="nikhitrivedi1-northeastern-university",
-        #     project="PatchTST_baseline_patch_study_test",
-        #     config=config,
-        #     name=config['run_name'],
-        # )
+        self.run = wandb.init(
+            entity="nikhitrivedi1-northeastern-university",
+            project="PatchTST_baseline_patch_study",
+            config=config,
+            name=config['run_name'],
+        )
 
     def forward(self, x):
         # Nomenclature to match PatchTST paper
@@ -122,7 +141,7 @@ class PatchTST(nn.Module):
 
         x = self.linear1(x) # output is (B, N, d_model)
 
-        x = x + self.pos_encoding # output is (B, N, d_model)
+        x = x + self.pos_encoding.forward(x) # output is (B, N, d_model)
         x = self.encoder(x) # output is (B, N, d_model)
 
         if self.config['channel_independence']:
@@ -327,8 +346,10 @@ def main():
     parser.add_argument('--optimizer_type', type=str, default='adam')
     parser.add_argument('--weight_decay', type=float, default=0.01)
     parser.add_argument('--loss', type=str, default='cross_entropy')
-    parser.add_argument('--run_type', type=str, default='test')
+    parser.add_argument('--run_type', type=str, default='validation')
+    parser.add_argument("--trainable_pos_encoding", action="store_true")
     parser.add_argument('--output_dir', type=str, default=None)
+    parser.add_argument('--classifier', type=str, default='linear')
 
     args = parser.parse_args()
     config = yaml.safe_load(open(args.config, 'r'))
@@ -345,6 +366,10 @@ def main():
     config['weight'] = torch.from_numpy(np.load('final_data_1024_mode_v/weights.npy')).float()
     config['run_type'] = args.run_type
     config['output_dir'] = args.output_dir
+    config['trainable_pos_encoding'] = args.trainable_pos_encoding
+    config['classifier'] = args.classifier
+    
+    print(f"Trainable Pos Encoding: {config['trainable_pos_encoding']}")
 
     # Based on args - load the correct data files
     # Load the data
@@ -419,11 +444,14 @@ def main():
         model.run.finish()
 
     # Save the model - don't need to save the model as we are using WB for validation - however, for test we do need to save the model
-    torch.save(model.state_dict(), f'{path_folder}/patchtst_model.pth')
-
-    # Save the config
-    with open(f'{path_folder}/config.yaml', 'w') as f:
-        yaml.dump(config, f)
+    if config['run_type'] == 'test':
+        torch.save(model.state_dict(), f'{path_folder}/patchtst_model.pth')
+        # Save the config
+        with open(f'{path_folder}/config.yaml', 'w') as f:
+            yaml.dump(config, f)
+    else:
+        pass
+    
 
 if __name__ == "__main__":
     main()
