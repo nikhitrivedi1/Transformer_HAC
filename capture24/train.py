@@ -11,9 +11,10 @@ import gzip
 import os
 import numpy as np
 from torch.utils.data import DataLoader
-from capture24.c24_data import C24_Dataset
-from capture24.patch_tst import PatchTST
-from capture24.cnn_model import CNNModel
+from c24_data import C24_Dataset
+from patch_tst import PatchTST
+from cnn_model import CNNModel
+from torchmetrics.classification import MulticlassF1Score
 
 def build_param_groups_adamw(model, weight_decay):
     decay = []
@@ -193,6 +194,10 @@ def main():
     parser.add_argument("--trainable_pos_encoding", action="store_true")
     parser.add_argument('--output_dir', type=str, default=None)
     parser.add_argument('--classifier', type=str, default='linear')
+    parser.add_argument('--jitter_prob', type=float, default=0.5)
+    parser.add_argument('--shift_prob', type=float, default=0.2)
+    parser.add_argument('--twarp_prob', type=float, default=0.3)
+    parser.add_argument('--mwarp_prob', type=float, default=0.3)
 
     args = parser.parse_args()
     config = yaml.safe_load(open(args.config, 'r'))
@@ -210,7 +215,10 @@ def main():
     config['output_dir'] = args.output_dir
     config['trainable_pos_encoding'] = args.trainable_pos_encoding
     config['classifier'] = args.classifier
-    
+    config['jitter_prob'] = args.jitter_prob
+    config['shift_prob'] = args.shift_prob
+    config['twarp_prob'] = args.twarp_prob
+    config['mwarp_prob'] = args.mwarp_prob
     print(f"Trainable Pos Encoding: {config['trainable_pos_encoding']}")
     # EXCLUDE_CLASSES = ['sleep', 'sitting']
     EXCLUDE_CLASSES = None
@@ -246,7 +254,13 @@ def main():
 
 
     # Create the test and train datasests
-    train_dataset = C24_Dataset(X_train, Y_train, idx_to_label, label_to_idx, exclude_classes=EXCLUDE_CLASSES)
+    augmentation_args = {
+        'jitter_sigma': 0.1, 'jitter_prob': config['jitter_prob'],
+        'shift_window': 200, 'shift_prob': config['shift_prob'],
+        'twarp_sigma': 0.05, 'twarp_knots': 4, 'twarp_prob': config['twarp_prob'],
+        'mwarp_sigma': 0.05, 'mwarp_knots': 2, 'mwarp_prob': config['mwarp_prob'],
+    }
+    train_dataset = C24_Dataset(X_train, Y_train, idx_to_label, label_to_idx, exclude_classes=EXCLUDE_CLASSES, augs_args=augmentation_args)
     print(train_dataset.get_class_distribution())
 
 

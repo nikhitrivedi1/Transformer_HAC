@@ -1,13 +1,13 @@
 # Libraries
 # Augmentation Class
-from capture24.augmentation import Augment
+from augmentation import Augment
 from torch.utils.data import Dataset
 import torch
 import numpy as np
 
 
 class C24_Dataset(Dataset):
-    def __init__(self, X, Y, idx_to_label, label_to_idx, exclude_classes=None, augs=None):
+    def __init__(self, X, Y, idx_to_label, label_to_idx, exclude_classes=None, augs_args: dict = None):
         """
         Dataset for Capture-24 accelerometer data.
         
@@ -41,7 +41,10 @@ class C24_Dataset(Dataset):
         self.Y = torch.from_numpy(Y).long()
         self.exclude_classes = exclude_classes
         self.filtered_size = len(self.Y)
-        self.augs = Augment()
+        if augs_args:
+            self.augs = Augment(**augs_args)
+        else:
+            self.augs = None
 
     def __len__(self):
         return len(self.X)
@@ -49,7 +52,10 @@ class C24_Dataset(Dataset):
     def __getitem__(self, index):
         # X will return a tensor of shape [T, C] and Y will return a tensor of shape [1]
         if self.augs:
-            return self.augs(self.X[index]), self.Y[index]
+            # need to conver to numpy array
+            x_np = self.X[index].numpy()
+            aug_x = self.augs(x_np)
+            return torch.from_numpy(np.ascontiguousarray(aug_x)), self.Y[index]
         return self.X[index], self.Y[index]
     
     def get_class_distribution(self):

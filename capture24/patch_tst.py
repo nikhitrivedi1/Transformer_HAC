@@ -113,7 +113,7 @@ class PatchTST(nn.Module):
         # WB Run - for logging
         self.run = wandb.init(
             entity="nikhitrivedi1-northeastern-university",
-            project="PatchTST_baseline",
+            project="PatchTST_Augmentation_Baseline",
             config=config,
             name=config['run_name'],
         )

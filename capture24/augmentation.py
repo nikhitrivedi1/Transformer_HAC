@@ -1,6 +1,7 @@
 import numpy as np
 from scipy.interpolate import CubicSpline
 from scipy.interpolate import interp1d
+import torch
 
 
 class Augment(object):
@@ -43,7 +44,6 @@ def jitter(x, sigma=0.1):
 
 
 def shift(x, window=2):
-    """ Note: assumes x in channels last format """
     w = np.random.randint(-window, window)
     x_new = np.roll(x, w, axis=0)
     return x_new
