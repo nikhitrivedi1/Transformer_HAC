@@ -1,0 +1,5 @@
+name: default
+
+datadir: ~/capture24_neurips/prepared_data/
+val_size: 20
+seq_length: 8

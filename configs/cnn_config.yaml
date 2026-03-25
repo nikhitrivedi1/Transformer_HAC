@@ -1,0 +1,27 @@
+# Globals
+stride: 1
+padding: 1
+
+# Layer1
+clayer_1_k: 3
+clayer_1_n: 128
+
+# Layer 2
+layer_2_k: 3
+layer_2_n: 128
+
+# Layer 3
+layer_3_k: 3
+layer_3_n: 256
+
+# Layer 4
+layer_4_k: 3
+layer_4_n: 256
+
+# Layer 5
+layer_5_k: 3
+layer_5_n: 512
+
+# Layer 6
+layer_6_k: 3
+layer_6_n: 512

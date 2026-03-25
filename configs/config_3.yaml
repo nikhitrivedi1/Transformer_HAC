@@ -1,0 +1,42 @@
+# Data Parameters
+patch_length: 16
+stride: 8
+num_channels: 3
+lookback_window: 1024
+num_batches: 128
+
+loss: cross_entropy
+
+# Training Parameters
+epochs: 75
+
+# Optimizer Parameters
+optimizer: 'adam'
+lr: .001 # 1e-3
+weight_decay: .01
+min_lr: .00000001 # 1e-7
+scheduler: 'cosine_warmup'
+warmup_epochs: 10
+
+# Transformer Encoder Parameters
+d_model : 128
+t_heads: 16
+t_dim_feedforward: 256
+t_dropout: 0.4
+t_activation: 'gelu'
+t_num_layers: 1
+
+# MLP Parameters
+mlp_hidden_size: 128
+num_classes: 10
+
+# Channel Independence Parameters
+channel_independence: true
+
+# Position encoding: fixed | learned | rope
+positional_encoding: fixed
+
+# Evaluation Parameters
+hook_attention_maps: false
+
+output_dir: config_3/
